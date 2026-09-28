@@ -403,11 +403,43 @@ const CONTAINER_TYPES = [
 ];
 
 /* ---------- Storage helpers (shared — public pilot data) ---------- */
+/* Browser-lagring: window.storage findes kun i Claudes eget forhåndsvisningsmiljø.
+   På den rigtige, offentlige side findes den slet ikke — uden dette lag fejlede
+   ALLE lokale gem-funktioner stille i baggrunden for rigtige besøgende. */
+if (!window.storage) {
+  window.storage = {
+    async get(key, shared){
+      const raw = localStorage.getItem('ppp_store_'+key);
+      if (raw === null) throw new Error('key not found');
+      return {key, value: raw, shared: !!shared};
+    },
+    async set(key, value, shared){
+      localStorage.setItem('ppp_store_'+key, value);
+      return {key, value, shared: !!shared};
+    },
+    async delete(key, shared){
+      const existed = localStorage.getItem('ppp_store_'+key) !== null;
+      localStorage.removeItem('ppp_store_'+key);
+      return {key, deleted: existed, shared: !!shared};
+    },
+    async list(prefix, shared){
+      const keys = [];
+      for (let i=0; i<localStorage.length; i++){
+        const k = localStorage.key(i);
+        if (k && k.indexOf('ppp_store_')===0){
+          const kk = k.slice('ppp_store_'.length);
+          if (!prefix || kk.indexOf(prefix)===0) keys.push(kk);
+        }
+      }
+      return {keys, prefix, shared: !!shared};
+    }
+  };
+}
 const SKEY = {
   members:"members", contacts:"region-contacts", calendar:"calendar-events",
   collections:"collections", log:"message-log", seq:"member-seq",
   fullreports:"full-haste-reports", settings:"org-settings",
-  orgcontainers:"org-containers", orgseq:"org-seq", news:"news-broadcasts"
+  orgcontainers:"org-containers", orgseq:"org-seq", news:"news-broadcasts", adminToken:"admin-token"
 };
 async function sget(key, fallback){
   try{ const r = await window.storage.get(key, true); return r ? JSON.parse(r.value) : fallback; }
@@ -421,12 +453,20 @@ async function sset(key, value){
 const API_URL = 'https://api.piff-paff-puff.dk/api.php';
 async function apiCall(action, data={}) {
   try {
+    const headers = {'Content-Type': 'application/json'};
+    if (state.adminToken) headers['X-Admin-Token'] = state.adminToken;
     const res = await fetch(API_URL, {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers,
       body: JSON.stringify({...data, action})
     });
-    return await res.json();
+    const r = await res.json();
+    if (r && r.code === 'admin_required' && state.adminUnlocked) {
+      state.adminUnlocked = false; state.adminToken = null;
+      await sset(SKEY.adminToken, null);
+      setTab('admin'); render();
+    }
+    return r;
   } catch(e) {
     console.error('API fejl:', e);
     return {ok: false, message: 'Netværksfejl — prøv igen.'};
@@ -496,7 +536,7 @@ let state = {
     youtube:"",
     about: {...ABOUT_DEFAULTS}
   },
-  adminUnlocked:false, loaded:false,
+  adminUnlocked:false, adminToken:null, loaded:false,
   qrpoints:[], orgseq:100000,
   pinSession:null, lockouts:{}, importPreview:null, qrScanPoint:null, scanDone:false, scanAutoFull:false, jobSub:"job",
 };
@@ -522,6 +562,12 @@ async function loadAll(){
   };
   state.lockouts = await sget('pin-lockouts', {});
   state.qrpoints = await sget('qr-drop-points', []);
+  const savedAdminToken = await sget(SKEY.adminToken, null);
+  if (savedAdminToken) {
+    const r = await apiCall('get_members', {});
+    if (r && r.ok) { state.adminToken = savedAdminToken; state.adminUnlocked = true; }
+    else { await sset(SKEY.adminToken, null); }
+  }
   state.loaded = true;
   render();
   // Sync from MySQL in background
@@ -1509,7 +1555,13 @@ function bindEvents(){
   root.querySelectorAll("[data-qr]").forEach(el=> el.addEventListener("click", ()=>{ state.qrSelected = el.dataset.qr; render(); }));
   root.querySelectorAll("[data-lang-toggle]").forEach(el=> el.addEventListener("click", ()=>{ state.lang = state.lang==="da" ? "en" : "da"; render(); }));
   root.querySelectorAll("[data-admin]").forEach(el=> el.addEventListener("click", ()=>{
-    if(el.dataset.admin==="logout"){ state.adminUnlocked=false; setTab("forside"); return; }
+    if(el.dataset.admin==="logout"){
+      const t=state.adminToken;
+      state.adminUnlocked=false; state.adminToken=null;
+      sset(SKEY.adminToken, null);
+      if(t) apiCall('admin_logout', {});
+      setTab("forside"); return;
+    }
     state.adminSub = el.dataset.admin; render();
   }));
 
@@ -1676,12 +1728,21 @@ function bindEvents(){
   if(fullForm) fullForm.addEventListener("submit", handleFullHaste);
 
   const gateForm = root.querySelector("#gate-form");
-  if(gateForm) gateForm.addEventListener("submit", (e)=>{
+  if(gateForm) gateForm.addEventListener("submit", async (e)=>{
     e.preventDefault();
     const code = new FormData(gateForm).get("code");
     if(!RATE.check('gate',10,60000)){gateForm.insertAdjacentHTML('afterend','<div class="msg err">For mange forsøg. Vent et minut.</div>');return;}
-    if(code==="fyn2026"){ state.adminUnlocked=true; state.adminSub="oversigt"; render(); }
-    else gateForm.insertAdjacentHTML("afterend", `<div class="msg err">Forkert adgangskode.</div>`);
+    const btn = gateForm.querySelector('button[type="submit"]');
+    if(btn){btn.disabled=true;}
+    const r = await apiCall('admin_login', {password: code});
+    if(btn){btn.disabled=false;}
+    if(r && r.ok && r.adminToken){
+      state.adminUnlocked=true; state.adminToken=r.adminToken; state.adminSub="oversigt";
+      await sset(SKEY.adminToken, r.adminToken);
+      render();
+    } else {
+      gateForm.insertAdjacentHTML("afterend", `<div class="msg err">${(r&&r.message)||"Forkert adgangskode."}</div>`);
+    }
   });
 
   const calForm = root.querySelector("#cal-form");
