@@ -439,7 +439,7 @@ const SKEY = {
   members:"members", contacts:"region-contacts", calendar:"calendar-events",
   collections:"collections", log:"message-log", seq:"member-seq",
   fullreports:"full-haste-reports", settings:"org-settings",
-  orgcontainers:"org-containers", orgseq:"org-seq", news:"news-broadcasts", adminToken:"admin-token"
+  orgcontainers:"org-containers", orgseq:"org-seq", news:"news-broadcasts", adminToken:"admin-token", adminRole:"admin-role", adminRegion:"admin-region"
 };
 async function sget(key, fallback){
   try{ const r = await window.storage.get(key, true); return r ? JSON.parse(r.value) : fallback; }
@@ -462,8 +462,8 @@ async function apiCall(action, data={}) {
     });
     const r = await res.json();
     if (r && r.code === 'admin_required' && state.adminUnlocked) {
-      state.adminUnlocked = false; state.adminToken = null;
-      await sset(SKEY.adminToken, null);
+      state.adminUnlocked = false; state.adminToken = null; state.adminRole = null; state.adminRegion = null;
+      await sset(SKEY.adminToken, null); await sset(SKEY.adminRole, null); await sset(SKEY.adminRegion, null);
       setTab('admin'); render();
     }
     return r;
@@ -511,6 +511,11 @@ async function syncFromAPI() {
     if(sr.ok && sr.suspicions) {
       state.suspicions = sr.suspicions.map(s=>({id:s.id,memberName:s.member_name,memberPhone:s.member_phone,memberNumber:s.member_number,desc:s.description,date:s.created_at}));
     }
+    if (state.adminUnlocked && state.adminRole === 'super') {
+      const [dr, aar] = await Promise.all([apiCall('get_deletion_requests'), apiCall('super_list_area_admins')]);
+      if (dr.ok && dr.requests) state.deletionRequests = dr.requests;
+      if (aar.ok && aar.areaAdmins) state.areaAdmins = aar.areaAdmins;
+    }
     if(state.loaded) render();
   } catch(e) { console.log('Sync fejl:', e); }
 }
@@ -526,6 +531,7 @@ const ABOUT_DEFAULTS = {
 
 let state = {
   tab:"forside", beholderSub:"tilmeld", adminSub:"oversigt", qrSelected:"app", lang:"da",
+  adminRole:null, adminRegion:null, gateMode:"super",
   members:[], contacts:{}, calendar:[], collections:[], log:[], seq:0, fullreports:[],
   orgcontainers:[], orgseq:100000, news:[],
   settings:{
@@ -564,9 +570,16 @@ async function loadAll(){
   state.qrpoints = await sget('qr-drop-points', []);
   const savedAdminToken = await sget(SKEY.adminToken, null);
   if (savedAdminToken) {
+    state.adminToken = savedAdminToken;
     const r = await apiCall('get_members', {});
-    if (r && r.ok) { state.adminToken = savedAdminToken; state.adminUnlocked = true; }
-    else { await sset(SKEY.adminToken, null); }
+    if (r && r.ok) {
+      state.adminUnlocked = true;
+      state.adminRole = await sget(SKEY.adminRole, 'super');
+      state.adminRegion = await sget(SKEY.adminRegion, null);
+    } else {
+      state.adminToken = null;
+      await sset(SKEY.adminToken, null);
+    }
   }
   state.loaded = true;
   render();
@@ -1189,28 +1202,46 @@ function indsamlingHTML(){
 
 /* ---------- ADMIN GATE + SHELL ---------- */
 function gateHTML(){
+  const mode = state.gateMode || 'super';
   return `
   <div class="gate">
     <span class="eyebrow">Admin</span>
-    <h2 style="font-size:20px;margin-bottom:14px;">Log ind som administrator</h2>
+    <div class="subnav" style="margin-bottom:14px;">
+      <button data-gate-mode="super" class="${mode==='super'?'active':''}">Super-admin</button>
+      <button data-gate-mode="area" class="${mode==='area'?'active':''}">Områdeadmin</button>
+    </div>
+    ${mode==='super' ? `
+    <h2 style="font-size:20px;margin-bottom:14px;">Log ind som super-admin</h2>
     <form id="gate-form">
       <input required name="code" type="password" placeholder="Adgangskode"/>
       <button class="btn" type="submit" style="width:100%;">Log ind</button>
-    </form>
+    </form>` : `
+    <h2 style="font-size:20px;margin-bottom:14px;">Log ind som områdeadmin</h2>
+    <form id="area-gate-form">
+      <input required name="email" type="email" placeholder="Områdets e-mail, fx fyn@piff-paff-puff.dk"/>
+      <input required name="password" type="password" placeholder="Adgangskode"/>
+      <button class="btn" type="submit" style="width:100%;">Log ind</button>
+    </form>`}
   </div>`;
 }
 function adminHTML(){
   const sub = state.adminSub;
-  const subs = [["oversigt","Oversigt"],["medlemmer","Medlemmer"],["firma","Firma/Event"],["fuldhaste","Fuld/Haste"],["kalender","Kalender"],["belob","Beløb"],["kontakt","Kontaktpersoner"],["org","Håbet & PPP"],["omtekst","Om os-tekst"],["nyheder","Nyheder/Besked"],["log","Besked-log"],["qrpoints","Afleveringspunkter"],["jobs","Jobopslag"],["vrijobs","Frivillig-projekter"],["hjælp","Hjælp til selvhjælp"],["partners","Samarbejdspartnere"],["eksport","Eksport/Backup"]];
+  const role = state.adminRole || 'super';
+  const superSubs = [["oversigt","Oversigt"],["medlemmer","Medlemmer"],["firma","Firma/Event"],["fuldhaste","Fuld/Haste"],["kalender","Kalender"],["belob","Beløb"],["kontakt","Kontaktpersoner"],["org","Håbet & PPP"],["omtekst","Om os-tekst"],["nyheder","Nyheder/Besked"],["log","Besked-log"],["qrpoints","Afleveringspunkter"],["jobs","Jobopslag"],["vrijobs","Frivillig-projekter"],["hjælp","Hjælp til selvhjælp"],["partners","Samarbejdspartnere"],["sletteanmodninger","Sletteanmodninger"],["omraadeadmins","Områdeadmins"],["eksport","Eksport/Backup"]];
+  const areaSubs = [["oversigt","Oversigt"],["medlemmer","Medlemmer"],["fuldhaste","Fuld/Haste"],["kalender","Kalender"],["belob","Beløb"],["egenkode","Skift adgangskode"]];
+  const subs = role === 'area' ? areaSubs : superSubs;
+  const label = role === 'area' ? `Områdeadmin — ${state.adminRegion || ''}` : 'Super-admin';
   return `
   <div class="subnav">
     ${subs.map(([id,l])=>`<button data-admin="${id}" class="${sub===id?'active':''}">${l}</button>`).join("")}
-    <button data-admin="logout" style="margin-left:auto;color:#D9614F;">Log ud</button>
+    <span style="margin-left:auto;align-self:center;font-size:12px;color:#8a8270;">${label}</span>
+    <button data-admin="logout" style="color:#D9614F;">Log ud</button>
   </div>
   ${({
     oversigt: adminOversigt, medlemmer: adminMedlemmer, firma: adminFirma, fuldhaste: adminFuldHaste,
     kalender: adminKalender, belob: adminBelob, kontakt: adminKontakt,
-    org: adminOrg, omtekst: adminOmTekst, nyheder: adminNyheder, log: adminLog, qrpoints: adminQRPoints, jobs: adminJobs, vrijobs: adminVrijobs, hjælp: adminHjælp, partners: adminPartners, eksport: adminEksport
+    org: adminOrg, omtekst: adminOmTekst, nyheder: adminNyheder, log: adminLog, qrpoints: adminQRPoints, jobs: adminJobs, vrijobs: adminVrijobs, hjælp: adminHjælp, partners: adminPartners, eksport: adminEksport,
+    sletteanmodninger: adminSletteanmodninger, omraadeadmins: adminOmraadeadmins, egenkode: adminEgenKode
   })[sub]()}
   `;
 }
@@ -1237,7 +1268,7 @@ function adminMedlemmer(){
   const rows = [...state.members].sort((a,b)=> new Date(b.signupDate)-new Date(a.signupDate));
   return `${statusLegendHTML()}<div class="card"><h3 style="font-size:16px;margin-bottom:12px;">Alle medlemmer (${rows.length})</h3>
   <div style="overflow-x:auto;"><table>
-  <thead><tr><th></th><th>Nr.</th><th>Navn</th><th>Type</th><th>Opbevaring</th><th>SMS</th><th>Område</th><th>Adresse</th><th>Status</th><th>Dato</th><th>Ansvarlig (mail)</th><th>Opgave</th></tr></thead>
+  <thead><tr><th></th><th>Nr.</th><th>Navn</th><th>Type</th><th>Opbevaring</th><th>SMS</th><th>Område</th><th>Adresse</th><th>Status</th><th>Dato</th><th>Ansvarlig (mail)</th><th>Opgave</th><th></th></tr></thead>
   <tbody>${rows.map(m=>`<tr>
     <td>${dotHTML('member',m.id,'left',m.opStatus)}</td>
     <td class="mono">${m.number}</td><td>${m.name}</td><td>${m.containerType||"—"}</td>
@@ -1248,8 +1279,46 @@ function adminMedlemmer(){
     <td class="mono" style="font-size:11px;">${new Date(m.signupDate).toLocaleDateString('da-DK')}</td>
     <td>${respEmailHTML('member',m.id,m.responsibleEmail)}</td>
     <td>${dotHTML('member',m.id,'right',m.caseHandled)}</td>
-  </tr>`).join("") || `<tr><td colspan="11" style="color:#8a8270;">Ingen medlemmer endnu.</td></tr>`}</tbody>
-  </table></div></div>`;
+    <td>${m.status==='deleted' ? '' : `<button class="btn small ghost" data-request-delete="${m.id}" data-name="${m.name}">Meld til sletning</button>`}</td>
+  </tr>`).join("") || `<tr><td colspan="12" style="color:#8a8270;">Ingen medlemmer endnu.</td></tr>`}</tbody>
+  </table></div></div>
+  <div id="delete-request-result"></div>`;
+}
+
+function adminSletteanmodninger(){
+  const rows = [...(state.deletionRequests||[])].sort((a,b)=> new Date(b.requested_at)-new Date(a.requested_at));
+  const statusLabel = {pending:'Afventer', approved:'Godkendt', rejected:'Afvist'};
+  return `<div class="card"><h3 style="font-size:16px;margin-bottom:12px;">Sletteanmodninger (${rows.length})</h3>
+  <p style="margin-top:0;font-size:12.5px;color:#8a8270;">Anmodningen (årsag og dato) kan ikke ændres — kun godkendes eller afvises. Godkendelse sletter medlemmet permanent fra databasen.</p>
+  <table><thead><tr><th>Dato</th><th>Medlem</th><th>Område</th><th>Anmodet af</th><th>Årsag</th><th>Status</th><th></th></tr></thead><tbody>
+  ${rows.map(r=>`<tr>
+    <td class="mono" style="font-size:11px;">${new Date(r.requested_at).toLocaleDateString('da-DK')}</td>
+    <td class="mono">${r.member_number}</td><td>${r.region}</td><td>${r.requested_by_region}</td>
+    <td style="max-width:260px;">${r.reason}</td>
+    <td><span class="pill ${r.status==='pending'?'pending':(r.status==='approved'?'active':'inactive')}">${statusLabel[r.status]}</span></td>
+    <td>${r.status==='pending' ? `<button class="btn small" data-approve-deletion="${r.id}">Godkend</button> <button class="btn small ghost" data-reject-deletion="${r.id}">Afvis</button>` : (r.decided_note||'')}</td>
+  </tr>`).join("") || `<tr><td colspan="7" style="color:#8a8270;">Ingen sletteanmodninger.</td></tr>`}</tbody></table></div>
+  <div id="deletion-result"></div>`;
+}
+
+function adminOmraadeadmins(){
+  const rows = [...(state.areaAdmins||[])].sort((a,b)=> a.region.localeCompare(b.region,'da'));
+  return `<div class="card"><h3 style="font-size:16px;margin-bottom:12px;">Områdeadmins (${rows.length})</h3>
+  <table><thead><tr><th>Område</th><th>E-mail</th><th>Sidst opdateret</th><th></th></tr></thead><tbody>
+  ${rows.map(a=>`<tr><td>${a.region}</td><td class="mono">${a.email}</td>
+    <td class="mono" style="font-size:11px;">${new Date(a.updated_at).toLocaleDateString('da-DK')}</td>
+    <td><button class="btn small ghost" data-reset-area="${a.region}" data-email="${a.email}">Nulstil adgangskode</button></td>
+  </tr>`).join("") || `<tr><td colspan="4" style="color:#8a8270;">Ingen områdeadmins fundet — kald ping mindst én gang for at oprette dem automatisk.</td></tr>`}</tbody></table></div>
+  <div id="area-admin-result"></div>`;
+}
+
+function adminEgenKode(){
+  return `<div class="card"><h3 style="font-size:16px;margin-bottom:12px;">Skift din egen adgangskode</h3>
+  <form id="area-pw-form">
+    <label>Nuværende adgangskode</label><input required type="password" name="currentPassword"/>
+    <label>Ny adgangskode (mindst 8 tegn)</label><input required type="password" name="newPassword" minlength="8"/>
+    <button class="btn" type="submit">Skift adgangskode</button>
+  </form><div id="area-pw-result"></div></div>`;
 }
 function adminFirma(){
   const rows = [...state.orgcontainers].sort((a,b)=> new Date(b.createdDate)-new Date(a.createdDate));
@@ -1557,8 +1626,8 @@ function bindEvents(){
   root.querySelectorAll("[data-admin]").forEach(el=> el.addEventListener("click", ()=>{
     if(el.dataset.admin==="logout"){
       const t=state.adminToken;
-      state.adminUnlocked=false; state.adminToken=null;
-      sset(SKEY.adminToken, null);
+      state.adminUnlocked=false; state.adminToken=null; state.adminRole=null; state.adminRegion=null;
+      sset(SKEY.adminToken, null); sset(SKEY.adminRole, null); sset(SKEY.adminRegion, null);
       if(t) apiCall('admin_logout', {});
       setTab("forside"); return;
     }
@@ -1727,6 +1796,10 @@ function bindEvents(){
   const fullForm = root.querySelector("#full-form");
   if(fullForm) fullForm.addEventListener("submit", handleFullHaste);
 
+  root.querySelectorAll("[data-gate-mode]").forEach(el=> el.addEventListener("click", ()=>{
+    state.gateMode = el.dataset.gateMode; render();
+  }));
+
   const gateForm = root.querySelector("#gate-form");
   if(gateForm) gateForm.addEventListener("submit", async (e)=>{
     e.preventDefault();
@@ -1737,11 +1810,33 @@ function bindEvents(){
     const r = await apiCall('admin_login', {password: code});
     if(btn){btn.disabled=false;}
     if(r && r.ok && r.adminToken){
-      state.adminUnlocked=true; state.adminToken=r.adminToken; state.adminSub="oversigt";
+      state.adminUnlocked=true; state.adminToken=r.adminToken; state.adminRole='super'; state.adminRegion=null; state.adminSub="oversigt";
       await sset(SKEY.adminToken, r.adminToken);
+      await sset(SKEY.adminRole, 'super');
+      await sset(SKEY.adminRegion, null);
       render();
     } else {
       gateForm.insertAdjacentHTML("afterend", `<div class="msg err">${(r&&r.message)||"Forkert adgangskode."}</div>`);
+    }
+  });
+
+  const areaGateForm = root.querySelector("#area-gate-form");
+  if(areaGateForm) areaGateForm.addEventListener("submit", async (e)=>{
+    e.preventDefault();
+    const fd = new FormData(areaGateForm);
+    if(!RATE.check('gate',10,60000)){areaGateForm.insertAdjacentHTML('afterend','<div class="msg err">For mange forsøg. Vent et minut.</div>');return;}
+    const btn = areaGateForm.querySelector('button[type="submit"]');
+    if(btn){btn.disabled=true;}
+    const r = await apiCall('area_login', {email: fd.get("email"), password: fd.get("password")});
+    if(btn){btn.disabled=false;}
+    if(r && r.ok && r.adminToken){
+      state.adminUnlocked=true; state.adminToken=r.adminToken; state.adminRole='area'; state.adminRegion=r.region; state.adminSub="oversigt";
+      await sset(SKEY.adminToken, r.adminToken);
+      await sset(SKEY.adminRole, 'area');
+      await sset(SKEY.adminRegion, r.region);
+      render();
+    } else {
+      areaGateForm.insertAdjacentHTML("afterend", `<div class="msg err">${(r&&r.message)||"Forkert e-mail eller adgangskode."}</div>`);
     }
   });
 
@@ -1835,10 +1930,53 @@ function bindEvents(){
   });
 
   root.querySelectorAll("[data-handle]").forEach(el=> el.addEventListener("click", async ()=>{
-    const rep = state.fullreports.find(f=>f.id===el.dataset.handle);
-    if(rep) rep.handled = true;
-    await sset(SKEY.fullreports, state.fullreports); render();
+    el.disabled = true;
+    const r = await apiCall('handle_report', {id: el.dataset.handle});
+    if(r && r.ok){ await syncFromAPI(); } else { el.disabled=false; alert((r&&r.message)||"Kunne ikke markere som klaret."); }
   }));
+
+  root.querySelectorAll("[data-request-delete]").forEach(el=> el.addEventListener("click", async ()=>{
+    const reason = prompt(`Årsag til sletteanmodning for ${el.dataset.name}:`);
+    if(!reason || !reason.trim()) return;
+    el.disabled = true;
+    const r = await apiCall('request_deletion', {memberId: el.dataset.requestDelete, reason: reason.trim()});
+    const box = root.querySelector("#delete-request-result");
+    if(r && r.ok){ if(box) box.innerHTML = `<div class="msg ok">${r.message}</div>`; }
+    else { el.disabled=false; if(box) box.innerHTML = `<div class="msg err">${(r&&r.message)||"Kunne ikke oprette anmodning."}</div>`; }
+  }));
+
+  root.querySelectorAll("[data-approve-deletion]").forEach(el=> el.addEventListener("click", async ()=>{
+    if(!confirm("Godkend sletning? Medlemmet fjernes permanent fra databasen. Dette kan ikke fortrydes.")) return;
+    el.disabled = true;
+    const r = await apiCall('decide_deletion', {id: el.dataset.approveDeletion, approve: true});
+    if(r && r.ok){ await syncFromAPI(); } else { el.disabled=false; alert((r&&r.message)||"Kunne ikke godkende."); }
+  }));
+  root.querySelectorAll("[data-reject-deletion]").forEach(el=> el.addEventListener("click", async ()=>{
+    const note = prompt("Valgfri note til afvisningen:") || "";
+    el.disabled = true;
+    const r = await apiCall('decide_deletion', {id: el.dataset.rejectDeletion, approve: false, note});
+    if(r && r.ok){ await syncFromAPI(); } else { el.disabled=false; alert((r&&r.message)||"Kunne ikke afvise."); }
+  }));
+
+  root.querySelectorAll("[data-reset-area]").forEach(el=> el.addEventListener("click", async ()=>{
+    const pw = prompt(`Ny adgangskode til ${el.dataset.email} (mindst 8 tegn):`);
+    if(!pw || pw.trim().length < 8) { if(pw!==null) alert("Adgangskoden skal være mindst 8 tegn."); return; }
+    el.disabled = true;
+    const r = await apiCall('super_set_area_admin', {region: el.dataset.resetArea, email: el.dataset.email, password: pw.trim()});
+    const box = root.querySelector("#area-admin-result");
+    el.disabled = false;
+    if(box) box.innerHTML = r && r.ok ? `<div class="msg ok">Adgangskode nulstillet for ${el.dataset.email}. Giv den videre til områdeadmin ad en sikker vej — den vises ikke igen.<br><b>${pw.trim()}</b></div>` : `<div class="msg err">${(r&&r.message)||"Kunne ikke nulstille."}</div>`;
+  }));
+
+  const areaPwForm = root.querySelector("#area-pw-form");
+  if(areaPwForm) areaPwForm.addEventListener("submit", async (e)=>{
+    e.preventDefault();
+    const fd = new FormData(areaPwForm);
+    const r = await apiCall('area_change_password', {currentPassword: fd.get("currentPassword"), newPassword: fd.get("newPassword")});
+    const box = root.querySelector("#area-pw-result");
+    if(box) box.innerHTML = r && r.ok ? `<div class="msg ok">Adgangskode skiftet.</div>` : `<div class="msg err">${(r&&r.message)||"Kunne ikke skifte adgangskode."}</div>`;
+    if(r && r.ok) areaPwForm.reset();
+  });
   root.querySelectorAll("[data-toggle-org]").forEach(el=> el.addEventListener("click", async ()=>{
     const c = state.orgcontainers.find(x=>x.id===el.dataset.toggleOrg);
     if(c) c.status = c.status==='active' ? 'inactive' : 'active';
