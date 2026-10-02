@@ -132,6 +132,9 @@ tr:hover td{background:rgba(74,144,196,.04);}
 .legend-row{display:flex;flex-wrap:wrap;gap:14px;}
 .legend-item{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary);}
 .legend-item .sw{width:14px;height:14px;border-radius:50%;flex-shrink:0;}
+.status-dot{width:17px;height:17px;border-radius:50%;border:2px solid rgba(255,255,255,.5);padding:0;flex-shrink:0;cursor:pointer;display:inline-block;transition:transform .1s;}
+.status-dot:hover{transform:scale(1.15);}
+.status-dot:focus-visible{outline:2px solid var(--steel-400);outline-offset:2px;}
 .opt-label{display:flex;align-items:center;gap:9px;border:1px solid var(--line-heavy);border-radius:var(--r-md);padding:11px 13px;cursor:pointer;background:var(--navy-700);font-size:13px;color:var(--text-secondary);}
 .opt-label:hover{border-color:var(--steel-400);}
 .opt-label input[type=checkbox],.opt-label input[type=radio]{width:auto;accent-color:var(--steel-400);}
@@ -497,7 +500,7 @@ async function syncFromAPI() {
       await sset(SKEY.calendar, state.calendar);
     }
     if(col.ok && col.collections) {
-      state.collections = col.collections.map(c=>({id:c.id,region:c.region,amount:c.amount,date:c.collection_date,note:c.note}));
+      state.collections = col.collections.map(c=>({id:c.id,region:c.region,amount:c.amount,date:c.collection_date,note:c.note,bankRef:c.bank_ref||''}));
       await sset(SKEY.collections, state.collections);
     }
     if(fr.ok && fr.reports) {
@@ -1228,7 +1231,7 @@ function adminHTML(){
   const sub = state.adminSub;
   const role = state.adminRole || 'super';
   const superSubs = [["oversigt","Oversigt"],["medlemmer","Medlemmer"],["firma","Firma/Event"],["fuldhaste","Fuld/Haste"],["kalender","Kalender"],["belob","Beløb"],["kontakt","Kontaktpersoner"],["org","Håbet & PPP"],["omtekst","Om os-tekst"],["nyheder","Nyheder/Besked"],["log","Besked-log"],["qrpoints","Afleveringspunkter"],["jobs","Jobopslag"],["vrijobs","Frivillig-projekter"],["hjælp","Hjælp til selvhjælp"],["partners","Samarbejdspartnere"],["sletteanmodninger","Sletteanmodninger"],["omraadeadmins","Områdeadmins"],["eksport","Eksport/Backup"]];
-  const areaSubs = [["oversigt","Oversigt"],["medlemmer","Medlemmer"],["fuldhaste","Fuld/Haste"],["kalender","Kalender"],["belob","Beløb"],["egenkode","Skift adgangskode"]];
+  const areaSubs = [["oversigt","Oversigt"],["medlemmer","Medlemmer"],["fuldhaste","Fuld/Haste"],["kalender","Kalender"],["egenkode","Skift adgangskode"]];
   const subs = role === 'area' ? areaSubs : superSubs;
   const label = role === 'area' ? `Områdeadmin — ${state.adminRegion || ''}` : 'Super-admin';
   return `
@@ -1384,9 +1387,12 @@ function adminBelob(){
   </div><button class="btn" type="submit">Registrér beløb</button></form></div>
   <div class="card"><h3 style="font-size:16px;">Samlet: <span class="mono">${total.toLocaleString('da-DK')} kr</span></h3>
   <div class="regions" style="margin:14px 0;">${ALL_REGIONS.map(r=>`<div class="region-tile ${r.hq?'hq':''}"><div class="grp">${r.group}</div><div class="name">${r.name}</div><div class="count">${(byRegion[r.name]||0).toLocaleString('da-DK')}<span>kr</span></div></div>`).join("")}</div>
-  <table><thead><tr><th>Dato</th><th>Område</th><th>Beløb</th><th>Note</th></tr></thead><tbody>
-  ${rows.map(c=>`<tr><td class="mono">${new Date(c.date).toLocaleDateString('da-DK')}</td><td>${c.region}</td><td class="mono">${Number(c.amount).toLocaleString('da-DK')} kr</td><td>${c.note||"—"}</td></tr>`).join("") || `<tr><td colspan="4" style="color:#8a8270;">Intet registreret endnu.</td></tr>`}
-  </tbody></table></div>`;
+  <table><thead><tr><th>Dato</th><th>Område</th><th>Beløb</th><th>Note</th><th>Bankoverførsel-nr. (afstemning)</th></tr></thead><tbody>
+  ${rows.map(c=>`<tr><td class="mono">${new Date(c.date).toLocaleDateString('da-DK')}</td><td>${c.region}</td><td class="mono">${Number(c.amount).toLocaleString('da-DK')} kr</td><td>${c.note||"—"}</td>
+  <td><input class="mono" style="min-width:160px;" data-bankref="${c.id}" value="${c.bankRef||''}" placeholder="fx overførsels-id fra banken"/></td></tr>`).join("") || `<tr><td colspan="5" style="color:#8a8270;">Intet registreret endnu.</td></tr>`}
+  </tbody></table>
+  <p style="font-size:12px;color:#8a8270;margin-top:8px;">Indtast bankens overførsels-/posteringsnummer her for hver indbetaling, så beløbet i appen kan afstemmes direkte mod banksaldoen.</p>
+  </div>`;
 }
 function adminKontakt(){
   return `<div class="card"><h3 style="font-size:16px;margin-bottom:12px;">Kontakt-mail pr. område</h3>
@@ -1984,17 +1990,36 @@ function bindEvents(){
   }));
   root.querySelectorAll("[data-dot]").forEach(el=> el.addEventListener("click", async ()=>{
     const kind = el.dataset.kind, id = el.dataset.id, side = el.dataset.dot;
-    const list = kind==="member" ? state.members : state.orgcontainers;
-    const key = kind==="member" ? SKEY.members : SKEY.orgcontainers;
-    const item = list.find(x=>x.id===id);
+    if(kind !== "member"){
+      // Org-beholdere er endnu ikke koblet til et rigtigt serverkald for status — forbliver lokal attrap.
+      const list = state.orgcontainers;
+      const item = list.find(x=>x.id===id);
+      if(!item) return;
+      if(side==="left"){
+        const cur = STATUS_ORDER.indexOf(item.opStatus||"green");
+        item.opStatus = STATUS_ORDER[(cur+1)%STATUS_ORDER.length];
+      } else { item.caseHandled = !item.caseHandled; }
+      await sset(SKEY.orgcontainers, list); render();
+      return;
+    }
+    const item = state.members.find(x=>x.id===id);
     if(!item) return;
+    el.disabled = true;
+    const payload = {id};
     if(side==="left"){
       const cur = STATUS_ORDER.indexOf(item.opStatus||"green");
-      item.opStatus = STATUS_ORDER[(cur+1)%STATUS_ORDER.length];
+      payload.opStatus = STATUS_ORDER[(cur+1)%STATUS_ORDER.length];
     } else {
-      item.caseHandled = !item.caseHandled;
+      payload.caseHandled = !item.caseHandled;
     }
-    await sset(key, list); render();
+    const r = await apiCall('set_member_status', payload);
+    if(r && r.ok){ await syncFromAPI(); } else { el.disabled=false; alert((r&&r.message)||"Kunne ikke gemme status."); }
+  }));
+  root.querySelectorAll("[data-bankref]").forEach(el=> el.addEventListener("change", async ()=>{
+    el.disabled = true;
+    const r = await apiCall('set_collection_bankref', {id: el.dataset.bankref, bankRef: el.value});
+    el.disabled = false;
+    if(!(r && r.ok)) alert((r&&r.message)||"Kunne ikke gemme bankreferencen.");
   }));
   root.querySelectorAll("[data-respemail]").forEach(el=> el.addEventListener("change", async ()=>{
     const kind = el.dataset.kind, id = el.dataset.respemail;
